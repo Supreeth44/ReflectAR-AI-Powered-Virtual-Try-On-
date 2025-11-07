@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AR-HAUL - Virtual Fitting Room</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            'sans': ['Helvetica Neue', 'Arial', 'sans-serif'] 
+          },
+          colors: {
+            'brand-black': '#1a1a1a',
+            'brand-off-white': '#f9f9f9',
+          }
+        }
+      }
+    }
+  </script>
+  
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@latest/dist/tf-backend-webgl.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@latest/dist/pose-detection.min.js"></script>
+
+  <style>
+    /* Custom style for the active product button */
+    .product-btn.active {
+      border-color: #1a1a1a;
+      box-shadow: 0 0 0 2px #1a1a1a;
+    }
+    /* Style for the store backdrop behind the webcam */
+    .store-backdrop {
+      background-image: url('./images/store_backdrop.png');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+  </style>
+</head>
+
+<body class="bg-brand-off-white text-brand-black font-sans min-h-screen">
+  
+  <div class="flex h-screen">
+
+    <div class="w-1/4 bg-white h-full p-8 border-r border-gray-200 overflow-y-auto">
+      <h1 class="text-3xl font-light tracking-widest uppercase mb-2">
+        AR-HAUL
+      </h1>
+      <p class="text-lg text-gray-600 mb-8">
+        Your Virtual Fitting Room
+      </p>
+
+      <h2 class="text-sm font-bold text-gray-500 uppercase tracking-widest mb-4">Select an Item</h2>
+      
+      <div class="grid grid-cols-2 gap-4">
+        
+        <button id="tshirt-btn" class="product-btn aspect-square border-2 border-gray-200 rounded-lg p-4 flex flex-col items-center justify-center hover:border-gray-400 transition-all focus:outline-none">
+          <img src="./images/tshirt.png" class="h-16 object-contain">
+          <span class="mt-2 text-sm font-medium">T-Shirt</span>
+        </button>
+
+        <button id="sunglasses-btn" class="product-btn aspect-square border-2 border-gray-200 rounded-lg p-4 flex flex-col items-center justify-center hover:border-gray-400 transition-all focus:outline-none">
+          <img src="./images/sunglasses.png" class="h-16 object-contain">
+          <span class="mt-2 text-sm font-medium">Sunglasses</span>
+        </button>
+
+      </div>
+      
+      <button id="clear-btn" class="bg-gray-300 text-brand-black font-medium py-3 px-4 rounded-lg hover:bg-gray-400 transition-colors w-full mt-6">
+        Clear All
+      </button>
+
+    </div>
+
+    <div class="w-3/4 h-full flex items-center justify-center p-8 relative store-backdrop">
+      <div class="relative w-full max-w-4xl mx-auto aspect-video border-4 border-gray-300 rounded-lg overflow-hidden shadow-lg bg-black bg-opacity-30">
+        
+        <div id="loading" class="absolute inset-0 bg-black bg-opacity-50 text-white text-lg flex items-center justify-center z-20">
+          Loading webcam and AI model...
+        </div>
+        
+        <video id="webcam" class="-scale-x-100 absolute top-0 left-0 w-full h-full object-cover" autoplay playsinline muted></video>
+        <canvas id="canvas" class="absolute top-0 left-0 w-full h-full -scale-x-100 z-10"></canvas>
+      </div>
+    </div>
+
+  </div> 
+
+  <script>
+    
+    // --- YOUR COMPLETE, UPGRADED AR JAVASCRIPT ---
+    
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('canvas');
+    const loading = document.getElementById('loading');
+    const productButtons = document.querySelectorAll('.product-btn'); 
+
+    let currentItem = null;
+    const clothingImages = {};
+
+    let targetX = 0, targetY = 0, targetWidth = 0, targetAngle = 0;
+    let currentX = 0, currentY = 0, currentWidth = 0, currentAngle = 0;
+    function lerp(start, end, amt) {
+      return (1 - amt) * start + amt * end;
+    }
+    
+    async function main() {
+      loading.innerText = "Requesting webcam access...";
+      try {
+        await setupWebcam();
+      } catch (err) {
+        console.error(err);
+        loading.innerText = "Error: Could not access webcam. Please grant permission and refresh.";
+        return;
+      }
+      
+      loading.innerText = "Loading images...";
+      try {
+        await preloadImages();
+      } catch (err) {
+        console.error(err);
+        loading.innerText = "Error: Could not load images. Check folder and filenames.";
+        return;
+      }
+
+      loading.innerText = "Loading AI Model, please wait...";
+      let model;
+      try {
+        model = await loadPoseDetectionModel();
+      } catch (err) {
+        console.error(err);
+        loading.innerText = "Error: Could not load AI model. Please check console or refresh.";
+        return;
+      }
+
+      setupControls();
+      loading.innerText = "AI Model Loaded! Starting AR...";
+      startTryOnLoop(model);
+    }
+
+    async function setupWebcam() {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+        audio: false,
+      });
+      video.srcObject = stream;
+      return new Promise((resolve) => {
+        video.onloadeddata = () => {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          console.log("Webcam and Canvas are set up.");
+          resolve();
+        };
+      });
+    }
+
+    async function loadPoseDetectionModel() {
+      const modelConfig = {
+        modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+        runtime: 'tfjs'
+      };
+      console.log("Loading MoveNet model...");
+      const model = await poseDetection.createDetector(
+        poseDetection.SupportedModels.MoveNet, 
+        modelConfig
+      );
+      console.log("MoveNet model loaded successfully.");
+      return model;
+    }
+
+    async function preloadImages() {
+      const imageSources = {
+        tshirt: './images/tshirt.png',
+        sunglasses: './images/sunglasses.png',
+        // --- Removed hat and necklace ---
+      };
+      const loadPromises = Object.keys(imageSources).map(key => {
+        return new Promise((resolve, reject) => {
+          const img = new Image();
+          img.src = imageSources[key];
+          img.onload = () => {
+            clothingImages[key] = img;
+            console.log(`Loaded image: ${key}`);
+            resolve();
+          };
+          img.onerror = () => {
+            reject(`Failed to load ${imageSources[key]}`);
+          };
+        });
+      });
+      await Promise.all(loadPromises);
+      console.log("All images pre-loaded.");
+    }
+
+    function setActiveButton(selectedId) {
+      productButtons.forEach(btn => {
+        if (btn.id === selectedId) {
+          btn.classList.add('active');
+        } else {
+          btn.classList.remove('active');
+        }
+      });
+    }
+
+    function setupControls() {
+      document.getElementById('tshirt-btn').onclick = () => {
+        currentItem = 'tshirt';
+        setActiveButton('tshirt-btn');
+      };
+      document.getElementById('sunglasses-btn').onclick = () => {
+        currentItem = 'sunglasses';
+        setActiveButton('sunglasses-btn');
+      };
+      // --- Removed hat and necklace buttons ---
+
+      document.getElementById('clear-btn').onclick = () => {
+        currentItem = null;
+        setActiveButton(null);
+      };
+    }
+
+    function startTryOnLoop(model) {
+      const ctx = canvas.getContext('2d');
+      async function runDetection() {
+        const poses = await model.estimatePoses(video, { flipHorizontal: false });
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        drawClothing(poses, ctx);
+        requestAnimationFrame(runDetection);
+      }
+      runDetection();
+      loading.style.display = 'none'; 
+    }
+
+    function drawClothing(poses, ctx) {
+      if (!currentItem || !clothingImages[currentItem] || !poses || poses.length === 0) {
+        return; 
+      }
+      const keypoints = poses[0].keypoints.reduce((acc, keypoint) => {
+        acc[keypoint.name] = keypoint;
+        return acc;
+      }, {});
+      const image = clothingImages[currentItem];
+      
+      const leftEye = keypoints.left_eye;
+      const rightEye = keypoints.right_eye;
+      const leftShoulder = keypoints.left_shoulder;
+      const rightShoulder = keypoints.right_shoulder;
+
+      if (currentItem === 'tshirt') {
+        if (leftShoulder.score < 0.5 || rightShoulder.score < 0.5) return;
+        targetWidth = Math.hypot(leftShoulder.x - rightShoulder.x, leftShoulder.y - rightShoulder.y) * 1.6; 
+        targetY = (leftShoulder.y + rightShoulder.y) / 2 + (targetWidth * 0.08); 
+        targetX = (leftShoulder.x + rightShoulder.x) / 2;
+        targetAngle = Math.atan2(leftShoulder.y - rightShoulder.y, leftShoulder.x - rightShoulder.x);
+
+      } else if (currentItem === 'sunglasses') {
+        if (leftEye.score < 0.5 || rightEye.score < 0.5) return;
+        targetWidth = Math.hypot(leftEye.x - rightEye.x, leftEye.y - rightEye.y) * 2.5;
+        targetX = (leftEye.x + rightEye.x) / 2;
+        targetY = (leftEye.y + rightEye.y) / 2 + (targetWidth * 0.05); 
+        targetAngle = Math.atan2(leftEye.y - rightEye.y, leftEye.x - rightEye.x);
+
+      } 
+      // --- Removed hat and necklace drawing logic ---
+
+      const smoothing = 0.3;
+      currentX = lerp(currentX, targetX, smoothing);
+      currentY = lerp(currentY, targetY, smoothing);
+      currentWidth = lerp(currentWidth, targetWidth, smoothing);       
+      currentAngle = lerp(currentAngle, targetAngle, smoothing);
+
+      ctx.save();
+      ctx.translate(currentX, currentY);
+      ctx.rotate(currentAngle);
+      const aspect = image.height / image.width;
+      const height = currentWidth * aspect;
+      ctx.drawImage(image, -currentWidth / 2, -height / 2, currentWidth, height);
+      ctx.restore();
+    }
+
+    main();
+  </script>
+
+</body>
+</html>
